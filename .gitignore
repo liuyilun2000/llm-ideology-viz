@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.cache/
+data/cache/
+img/
+.env/
+.venv/
+.hf_token 
