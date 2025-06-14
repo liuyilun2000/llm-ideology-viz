@@ -15,15 +15,17 @@ from transformer_lens import HookedTransformer
 from transformers import AutoTokenizer, AutoModel
 
 
+from datasets import load_dataset
+
 from utils import process_activations, load_activations
 
 
 
-# Load Hugging Face token from a local file
+'''
+# Load Hugging Face token from local file
 with open('.hf_token', 'r') as f:
     HF_TOKEN = f.read().strip()
 
-'''
 MODEL_NAME="mistralai/Mistral-7B-v0.3"
 MODEL_NAME="meta-llama/Llama-2-7b-hf"
 MODEL_NAME="meta-llama/Meta-Llama-3-8B"
@@ -38,24 +40,30 @@ llama3_model = AutoModel.from_pretrained(MODEL_NAME,
 '''
 
 
-from datasets import load_dataset
 
 
+def load_parlasent(datasets: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Load and process the ParlaSent datasets into a single DataFrame.
 
-# Function to load and process a dataset
-def load_and_process_dataset(dataset):
-    ds = load_dataset("classla/ParlaSent", dataset)['train']
-    df = pd.DataFrame(ds)
-    df['dataset'] = dataset
-    return df[['dataset', 'sentence', 'country', 'date', 'name', 'party', 'gender', 'birth_year', 'ruling']]
+    Args:
+        datasets: List of dataset codes to load (default: all available)
 
-# Load and process all datasets
-datasets = ['EN', 'EN_additional_test', 'BCS', 'BCS_additional_test', 'CZ', 'SK', 'SL']
+    Returns:
+        pd.DataFrame: Combined DataFrame with columns ['dataset', 'sentence', 'country', 'date', 'name', 'party', 'gender', 'birth_year', 'ruling']
+    """
+    if datasets is None:
+        datasets = ['EN', 'EN_additional_test', 'BCS', 'BCS_additional_test', 'CZ', 'SK', 'SL']
 
-dfs = [load_and_process_dataset(dataset) for dataset in tqdm(datasets)]
+    def load_and_process_dataset(dataset):
+        ds = load_dataset("classla/ParlaSent", dataset)['train']
+        df = pd.DataFrame(ds)
+        df['dataset'] = dataset
+        return df[['dataset', 'sentence', 'country', 'date', 'name', 'party', 'gender', 'birth_year', 'ruling']]
 
-# Combine all dataframes
-df = pd.concat(dfs, ignore_index=True)
+    dfs = [load_and_process_dataset(dataset) for dataset in tqdm(datasets, desc="Loading ParlaSent datasets")]
+    df = pd.concat(dfs, ignore_index=True)
+    return df
 
 
 
