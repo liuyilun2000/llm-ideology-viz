@@ -10,6 +10,32 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.preprocessing import LabelEncoder
 from typing import List, Optional
 
+from datasets import load_dataset
+
+def load_parlasent(datasets: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    Load and process the ParlaSent datasets into a single DataFrame.
+
+    Args:
+        datasets: List of dataset codes to load (default: all available)
+
+    Returns:
+        pd.DataFrame: Combined DataFrame with columns ['dataset', 'sentence', 'country', 'date', 'name', 'party', 'gender', 'birth_year', 'ruling']
+    """
+    if datasets is None:
+        datasets = ['EN', 'EN_additional_test', 'BCS', 'BCS_additional_test', 'CZ', 'SK', 'SL']
+    
+    def load_and_process_dataset(dataset):
+        ds = load_dataset("classla/ParlaSent", dataset)['train']
+        df = pd.DataFrame(ds)
+        df['dataset'] = dataset
+        return df[['dataset', 'sentence', 'country', 'date', 'name', 'party', 'gender', 'birth_year', 'ruling']]
+    
+    dfs = [load_and_process_dataset(dataset) for dataset in tqdm(datasets, desc="Loading ParlaSent datasets")]
+    df = pd.concat(dfs, ignore_index=True)
+    return df
+
+
 def cache_activations(
     sentences: List[str],
     model_name: str,
@@ -18,7 +44,7 @@ def cache_activations(
     activation_type: str = "mlp",
     pooling_type: str = "mean",
     device: str = "cpu",
-    batch_size: int = 1,
+    batch_size: int = 100,
     skip_batch: int = 0,
 ) -> None:
     """
@@ -36,7 +62,11 @@ def cache_activations(
         skip_batch (int): Number of batches to skip (for resuming).
     """
     # Load model
-    model = HookedTransformer.from_pretrained(model_name, cache_dir=cache_dir)
+    model = HookedTransformer.from_pretrained(
+        model_name, 
+        trust_remote_code=True,
+        cache_dir=cache_dir,
+    )
     model.eval()
     model.to(device)
 
@@ -82,9 +112,11 @@ def cache_activations(
         res = torch.stack(batch_activations)
         torch.save(res.cpu(), os.path.join(output_dir, f"{batch_idx}.pt"))
 
-def load_activations(output_dir: str, num_files: int) -> torch.Tensor:
+
+def load_activations(output_dir: str, num_files: Optional[int] = None) -> torch.Tensor:
     """
     Load saved activation tensors from a directory and stack them.
+    Performs sanity checks on the loaded files.
 
     Args:
         output_dir (str): Directory where activation tensors are saved.
@@ -93,10 +125,34 @@ def load_activations(output_dir: str, num_files: int) -> torch.Tensor:
     Returns:
         torch.Tensor: Stacked tensor of all loaded activations.
     """
+    # Get all .pt files in directory
+    pt_files = [f for f in os.listdir(output_dir) if f.endswith('.pt')]
+    pt_files.sort(key=lambda x: int(x.split('.')[0]))  # Sort numerically
+    
+    # Sanity check: Verify all expected files exist
+    if num_files is None:
+        num_files = len(pt_files)
+    expected_files = set(f"{i}.pt" for i in range(num_files))
+    actual_files = set(pt_files)
+    missing_files = expected_files - actual_files
+    if missing_files:
+        raise FileNotFoundError(f"Missing activation files: {missing_files}")
+    
+    # Load and verify each file
     activations = []
-    for i in tqdm(range(num_files), desc="Loading activations"):
-        activation = torch.load(os.path.join(output_dir, f"{i}.pt"))
+    for file_name in tqdm(pt_files, desc="Loading activations"):
+        file_path = os.path.join(output_dir, file_name)
+        activation = torch.load(file_path)
+        
+        # Sanity check: Verify tensor shape and type
+        if not isinstance(activation, torch.Tensor):
+            raise TypeError(f"Expected torch.Tensor, got {type(activation)} for file {file_name}")
+        if len(activation.shape) != 3:  # Assuming shape is [batch_size, num_layers, hidden_size]
+            raise ValueError(f"Unexpected tensor shape {activation.shape} for file {file_name}")
+            
         activations.append(activation)
+    
+    # Stack all activations
     return torch.cat(activations, dim=0)
 
 # Example usage:
