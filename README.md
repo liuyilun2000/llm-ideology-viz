@@ -1,6 +1,9 @@
-# LLM Ideology Visualization
+# Ideological Neural Manifolds of Large Language Models
 
-This project provides tools for caching model activations and visualizing political speech embeddings using LLMs.
+[![IC2S2]](https://arxiv.org/abs/2311.15983)
+
+This project serves as the official reposittory for the paper **Ideological Neural Manifolds of Large Language Models** by Yilun Liu, Daniel Matter and Jürgen Pfeffer,
+providing tools for caching model activations and visualizing political speech embeddings using LLMs.
 
 ## Setup
 
