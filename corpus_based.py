@@ -367,7 +367,7 @@ party_colors = {
 }
 
 df_filtered = df[
-    (df['country'] == 'UK') & 
+    (df['country'] == country) & 
     (df['party'].isin(parties))
 ]
 df_filtered = df_filtered.sort_values('party')
