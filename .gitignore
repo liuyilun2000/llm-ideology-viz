@@ -8,3 +8,7 @@ img/
 .env/
 .venv/
 .hf_token 
+
+output/
+
+*.sh

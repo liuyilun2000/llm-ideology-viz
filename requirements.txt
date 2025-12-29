@@ -8,4 +8,5 @@ plotly
 tqdm
 transformers
 datasets
-torch 
+torch
+transformer_lens 
