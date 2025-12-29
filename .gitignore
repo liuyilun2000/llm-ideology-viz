@@ -12,3 +12,5 @@ img/
 output/
 
 *.sh
+
+.env
