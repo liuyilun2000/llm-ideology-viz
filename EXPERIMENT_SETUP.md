@@ -8,29 +8,29 @@ Guide for running corpus-based framework experiments using the ParlaSent dataset
 
 **2D Visualization:**
 ```bash
-# UK ParlaSent experiment (paper replication)
-bash scripts/run_uk_parlasent_2d_experiment.sh
+# UK experiment (paper replication)
+bash scripts/uk_2d.sh
 
-# Czech ParlaSent
-bash scripts/run_cz_parlasent_2d_experiment.sh
+# Czech
+bash scripts/cz_2d.sh
 
 # Cross-model comparison
-bash scripts/run_cross_model_2d_experiment.sh
+bash scripts/cross_model_2d.sh
 
 # Layer analysis
-bash scripts/run_layer_analysis_2d_experiment.sh
+bash scripts/layer_analysis_2d.sh
 ```
 
 **1D Visualization:**
 ```bash
-# UK ParlaSent 1D distribution
-bash scripts/run_uk_parlasent_1d_experiment.sh
+# UK 1D distribution
+bash scripts/uk_1d.sh
 
-# Czech ParlaSent 1D distribution
-bash scripts/run_cz_parlasent_1d_experiment.sh
+# Czech 1D distribution
+bash scripts/cz_1d.sh
 
 # Generic 1D visualization
-bash scripts/run_1d_visualization_experiment.sh
+bash scripts/1d_visualization.sh
 ```
 
 ### Python Script

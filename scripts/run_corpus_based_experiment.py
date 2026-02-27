@@ -231,8 +231,8 @@ def parse_arguments():
     parser.add_argument(
         '--batch_size',
         type=int,
-        default=100,
-        help='Batch size for activation caching'
+        default=1,
+        help='Batch size for activation caching (number of activations per batch file, default: 1 to minimize memory usage)'
     )
     
     return parser.parse_args()
@@ -252,6 +252,92 @@ def load_party_colors(party_colors_args):
             print(f"Warning: Invalid party color format: {pair}. Expected 'Party:Color'")
     
     return party_colors if party_colors else None
+
+
+def align_1d_projections_across_layers(
+    analyzer,
+    metadata: pd.DataFrame,
+    party_column: str,
+    dimension: int = 0
+):
+    """
+    Align 1D LDA projections across layers to prevent horizontal flipping.
+    
+    Uses the first layer as reference. For each subsequent layer, tries both
+    original and flipped versions, and chooses the one that minimizes the
+    total variation in party centroids compared to the reference layer.
+    
+    Args:
+        analyzer: CorpusBasedAnalyzer instance with fitted LDA models
+        metadata: DataFrame with party labels
+        party_column: Column name containing party labels
+        dimension: Which LDA dimension to align (0-indexed)
+    """
+    if len(analyzer.projections) == 0:
+        return
+    
+    # Get sorted layer indices
+    sorted_layers = sorted(analyzer.projections.keys())
+    
+    if len(sorted_layers) < 2:
+        # Only one layer, nothing to align
+        return
+    
+    # Check if dimension exists in all layers
+    for layer_idx in sorted_layers:
+        if dimension >= analyzer.projections[layer_idx].shape[1]:
+            print(f"Warning: Dimension {dimension} not available in all layers. Skipping alignment.")
+            return
+    
+    # Get party labels
+    labels = metadata[party_column].values
+    unique_parties = np.unique(labels)
+    
+    # Reference layer: first layer
+    ref_layer_idx = sorted_layers[0]
+    ref_projections = analyzer.projections[ref_layer_idx]
+    ref_dim_values = ref_projections[:, dimension]
+    
+    # Calculate reference party centroids (mean per party)
+    ref_party_centroids = {}
+    for party in unique_parties:
+        party_mask = labels == party
+        ref_party_centroids[party] = np.mean(ref_dim_values[party_mask])
+    
+    print(f"  Alignment reference: Layer {ref_layer_idx}")
+    print(f"    Reference centroids: {', '.join([f'{p}: {v:.4f}' for p, v in sorted(ref_party_centroids.items())])}")
+    
+    # Align subsequent layers
+    for layer_idx in sorted_layers[1:]:
+        layer_projections = analyzer.projections[layer_idx]
+        layer_dim_values = layer_projections[:, dimension].copy()
+        
+        # Calculate centroids for original orientation
+        original_party_centroids = {}
+        for party in unique_parties:
+            party_mask = labels == party
+            original_party_centroids[party] = np.mean(layer_dim_values[party_mask])
+        
+        # Calculate centroids for flipped orientation
+        flipped_dim_values = -layer_dim_values
+        flipped_party_centroids = {}
+        for party in unique_parties:
+            party_mask = labels == party
+            flipped_party_centroids[party] = np.mean(flipped_dim_values[party_mask])
+        
+        # Calculate total variation (sum of squared differences) for both orientations
+        original_variation = sum((original_party_centroids[party] - ref_party_centroids[party])**2 
+                                 for party in unique_parties)
+        flipped_variation = sum((flipped_party_centroids[party] - ref_party_centroids[party])**2 
+                                for party in unique_parties)
+        
+        # Choose orientation with smaller variation
+        if flipped_variation < original_variation:
+            # Flip this dimension
+            analyzer.projections[layer_idx][:, dimension] *= -1
+            print(f"  Layer {layer_idx}: Flipped (variation: original={original_variation:.6f}, flipped={flipped_variation:.6f})")
+        else:
+            print(f"  Layer {layer_idx}: Not flipped (variation: original={original_variation:.6f}, flipped={flipped_variation:.6f})")
 
 
 def main():
@@ -322,7 +408,12 @@ def main():
     # Step 4: Extract or load activations
     print("\n[3/6] Processing activations...")
     
-    # Set up pooling strategy
+    # Check for cached activations FIRST before loading model
+    from data.activation_cache import check_cached_activations
+    index_path = os.path.join(args.activations_cache_dir, 'activation_index.json')
+    has_id_based_cache = os.path.exists(index_path)
+    
+    # Set up pooling strategy (needed for analyzer initialization)
     if args.pooling_type == 'mean':
         pooling_strategy = MeanPooling()
     elif args.pooling_type == 'max':
@@ -332,6 +423,8 @@ def main():
     else:
         raise ValueError(f"Unsupported pooling type: {args.pooling_type}")
     
+    # Initialize analyzer with lazy model loading
+    # Model will only be loaded if we need to extract activations
     analyzer = CorpusBasedAnalyzer(
         model_name=args.model_name,
         cache_dir=args.cache_dir,
@@ -340,12 +433,6 @@ def main():
         random_seed=args.random_seed,
         hf_token=hf_token
     )
-    
-    # Check if ID-based cache exists
-    from data.activation_cache import check_cached_activations
-    import os
-    index_path = os.path.join(args.activations_cache_dir, 'activation_index.json')
-    has_id_based_cache = os.path.exists(index_path)
     
     if has_id_based_cache:
         # Use ID-based caching system
@@ -373,7 +460,7 @@ def main():
                 missing_indices = all_indices - cached_indices
                 missing_df = df_filtered.loc[list(missing_indices)]
                 
-                # Cache missing texts
+                # Cache missing texts (model will be loaded lazily when needed)
                 cache_activations_by_id(
                     df=missing_df,
                     text_column=args.text_column,
@@ -384,7 +471,8 @@ def main():
                     device=args.device,
                     batch_size=args.batch_size,
                     cache_dir=None,
-                    hf_token=hf_token
+                    hf_token=hf_token,
+                    model=analyzer.get_model()  # Reuse model to avoid double loading
                 )
                 
                 # Reload all activations
@@ -404,6 +492,7 @@ def main():
                         lambda x: x.cpu().numpy() if isinstance(x, torch.Tensor) else x
                     )
             
+            # Analyzer already initialized (model won't be loaded since we have cached activations)
             analyzer.pooled_activations = np.stack(df_with_embeddings['embedding'].values)
             
             # Set layer_indices
@@ -452,6 +541,7 @@ def main():
                         lambda x: x.cpu().numpy() if isinstance(x, torch.Tensor) else x
                     )
             
+            # Analyzer already initialized (model won't be loaded since we have cached activations)
             analyzer.pooled_activations = np.stack(df_with_embeddings['embedding'].values)
             
             # Set layer_indices
@@ -467,6 +557,7 @@ def main():
             print(f"Loaded activations: shape {analyzer.pooled_activations.shape}")
         else:
             # Extract new activations using ID-based caching
+            # Analyzer already initialized - model will be loaded lazily when needed
             if cache_metadata is not None:
                 print(f"Warning: Cached activations found but parameters don't match. Re-extracting...")
             else:
@@ -485,7 +576,8 @@ def main():
                     device=args.device,
                     batch_size=args.batch_size,
                     cache_dir=None,
-                    hf_token=hf_token
+                    hf_token=hf_token,
+                    model=analyzer.get_model()  # Reuse model to avoid double loading
                 )
                 
                 # Load the cached activations
@@ -543,6 +635,16 @@ def main():
     )
     
     print(f"Fitted LDA models for {len(lda_results)} layer(s)")
+    
+    # Align 1D projections across layers if 1D visualization is enabled
+    if args.visualize_1d and len(analyzer.projections) > 1:
+        print("\nAligning 1D projections across layers to prevent horizontal flipping...")
+        align_1d_projections_across_layers(
+            analyzer=analyzer,
+            metadata=df_with_embeddings,
+            party_column=args.party_column,
+            dimension=args.lda_dimension
+        )
     
     # Step 6: Generate visualizations
     print("\n[5/6] Generating visualizations...")

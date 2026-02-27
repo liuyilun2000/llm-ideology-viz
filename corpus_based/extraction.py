@@ -35,7 +35,8 @@ class ActivationExtractor:
         cache_dir: Optional[str] = None,
         device: str = "cuda",
         trust_remote_code: bool = True,
-        hf_token: Optional[str] = None
+        hf_token: Optional[str] = None,
+        load_model: bool = True
     ):
         """
         Initialize the activation extractor.
@@ -46,18 +47,22 @@ class ActivationExtractor:
             device: Device to run the model on ('cpu' or 'cuda')
             trust_remote_code: Whether to trust remote code in model loading
             hf_token: HuggingFace token. If None, tries to load from .env file or environment variable
+            load_model: Whether to load the model immediately (default: True). Set to False for lazy loading.
         """
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.device = device
         self.model = None
+        self.trust_remote_code = trust_remote_code
         
         # Load HF token if not provided
         if hf_token is None:
             hf_token = get_hf_token()
         
         self.hf_token = hf_token
-        self._load_model(trust_remote_code)
+        
+        if load_model:
+            self._load_model(trust_remote_code)
     
     def _load_model(self, trust_remote_code: bool = True):
         """Load the model for activation extraction."""
@@ -76,6 +81,23 @@ class ActivationExtractor:
             if self.cache_dir is not None:
                 kwargs['cache_dir'] = self.cache_dir
             
+            # Use bfloat16 for models that are provided in bfloat16 (like Qwen3-4B)
+            # This reduces memory usage and matches how models are stored
+            if self.device == 'cuda' and torch.cuda.is_available():
+                # Check if CUDA supports bfloat16 (Ampere+ GPUs)
+                if torch.cuda.is_bf16_supported():
+                    kwargs['torch_dtype'] = torch.bfloat16
+                    print("Using bfloat16 precision for model loading (reduces memory usage)")
+                else:
+                    # Fallback to float16 if bfloat16 not supported
+                    kwargs['torch_dtype'] = torch.float16
+                    print("Using float16 precision for model loading (bfloat16 not supported)")
+            # For CPU, use float32 (more stable, but models are typically bfloat16)
+            
+            # Clear CUDA cache before loading to free up memory
+            if self.device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             self.model = HookedTransformer.from_pretrained(self.model_name, **kwargs)
         finally:
             # Restore original token if it existed
@@ -84,9 +106,27 @@ class ActivationExtractor:
             elif 'HF_TOKEN' in os.environ and not self.hf_token:
                 # Only remove if we set it and there was no original
                 pass
-        self.model.eval()
-        self.model.to(self.device)
-        torch.set_grad_enabled(False)
+        
+        try:
+            self.model.eval()
+            # Move to device with error handling
+            if self.device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()  # Clear cache before moving
+            self.model.to(self.device)
+            if self.device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.synchronize()  # Ensure move is complete
+                torch.cuda.empty_cache()
+            torch.set_grad_enabled(False)
+        except Exception as e:
+            print(f"Error setting up model: {e}")
+            if self.device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            raise
+    
+    def _ensure_model_loaded(self):
+        """Ensure the model is loaded (lazy loading)."""
+        if self.model is None:
+            self._load_model(self.trust_remote_code)
     
     def extract_activations(
         self,
@@ -119,6 +159,9 @@ class ActivationExtractor:
                          N is number of texts, L is number of layers, D_act is activation dimension
                          (sequence dimension is pooled immediately)
         """
+        # Ensure model is loaded
+        self._ensure_model_loaded()
+        
         if activation_type == "mlp":
             activation_filter = lambda name: ("mlp" in name) and ("hook_post" in name)
         elif activation_type == "attention":
@@ -281,4 +324,15 @@ class ActivationExtractor:
             return self.model.cfg.d_model
         else:  # mlp
             return self.model.cfg.d_mlp
+    
+    def get_model(self) -> HookedTransformer:
+        """
+        Get the loaded model instance for reuse.
+        
+        Returns:
+            The HookedTransformer model instance
+        """
+        # Lazy load if not already loaded
+        self._ensure_model_loaded()
+        return self.model
 

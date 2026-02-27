@@ -687,6 +687,17 @@ class CorpusVisualizer:
             metadata = metadata.copy()
             metadata[col] = projections[:, i]
         
+        # First pass: collect all speaker counts to find maximum for proper scaling
+        max_speaker_count = 0
+        if speaker_column and speaker_column in metadata.columns:
+            for party in metadata[party_column].unique():
+                party_mask = metadata[party_column] == party
+                for speaker in metadata[party_mask][speaker_column].unique():
+                    speaker_mask = (metadata[party_column] == party) & \
+                                  (metadata[speaker_column] == speaker)
+                    speaker_count = np.sum(speaker_mask)
+                    max_speaker_count = max(max_speaker_count, speaker_count)
+        
         # Process each party
         for party in metadata[party_column].unique():
             party_mask = metadata[party_column] == party
@@ -713,12 +724,16 @@ class CorpusVisualizer:
                     speaker_count = np.sum(speaker_mask)
                     speaker_center = np.mean(speaker_points, axis=0)
                     
-                    # Calculate speaker size with square root scaling to prevent too large sizes
-                    base_size = 0
-                    size_scaling = np.sqrt(speaker_count) * 4
-                    speaker_size = base_size + size_scaling
-                    max_speaker_size = 150
-                    speaker_size = min(speaker_size, max_speaker_size)
+                    # Calculate speaker size with square root scaling, normalized to max speaker count
+                    # Same scaling as 1D visualization: sqrt(normalized_count) * 32, min 4
+                    if max_speaker_count > 0:
+                        # Normalize by max count, then apply square root scaling
+                        normalized_count = speaker_count / max_speaker_count
+                        # Use square root to prevent very large speakers from dominating
+                        size_scaling = np.sqrt(normalized_count) * 32  # Scale to max 32
+                        speaker_size = max(4, size_scaling)  # Minimum size of 4 for visibility
+                    else:
+                        speaker_size = 20  # Default size if no speakers
                     
                     speaker_data = {
                         'Party': party,
@@ -765,7 +780,7 @@ class CorpusVisualizer:
         title: Optional[str] = None,
         show_legend: bool = True,
         show_individual_speeches: bool = False,
-        bins: int = 50
+            bins: int = 200
     ) -> go.Figure:
         """
         Create a 1D distribution plot of a single LDA dimension.
@@ -785,7 +800,7 @@ class CorpusVisualizer:
             title: Optional plot title
             show_legend: Whether to show legend
             show_individual_speeches: Whether to show individual speech points
-            bins: Number of bins for histogram
+            bins: Number of bins for histogram (default: 200 for high resolution)
         
         Returns:
             plotly Figure object
@@ -800,7 +815,42 @@ class CorpusVisualizer:
         # Extract single dimension
         X_1d = projections[:, dimension]
         
-        # Normalize coordinates
+        # Filter extreme outliers BEFORE normalization and histogram calculation
+        # Use percentile-based method (more conservative than IQR) to preserve all parties
+        # Only filter the most extreme outliers (top/bottom 0.5%) to avoid removing entire parties
+        lower_percentile = 0.5
+        upper_percentile = 99.5
+        lower_bound = np.percentile(X_1d, lower_percentile)
+        upper_bound = np.percentile(X_1d, upper_percentile)
+        
+        # Create mask for non-outlier points
+        outlier_mask = (X_1d >= lower_bound) & (X_1d <= upper_bound)
+        n_outliers = np.sum(~outlier_mask)
+        
+        # Check if filtering would remove entire parties - if so, don't filter
+        if n_outliers > 0:
+            # Check party distribution before and after filtering
+            parties_before = metadata[party_column].value_counts()
+            parties_after = metadata[outlier_mask][party_column].value_counts()
+            
+            # Only filter if no party loses more than 10% of its data points
+            should_filter = True
+            for party in parties_before.index:
+                count_before = parties_before[party]
+                count_after = parties_after.get(party, 0)
+                if count_before > 0 and (count_after / count_before) < 0.9:
+                    should_filter = False
+                    break
+            
+            if should_filter:
+                print(f"Filtering {n_outliers} extreme outliers ({100*n_outliers/len(X_1d):.1f}%) using percentile method ({lower_percentile}-{upper_percentile}%)")
+                # Filter metadata to match filtered data
+                metadata = metadata[outlier_mask].reset_index(drop=True)
+                X_1d = X_1d[outlier_mask]
+            else:
+                print(f"Skipping outlier filtering to preserve all parties (would have filtered {n_outliers} points)")
+        
+        # Normalize coordinates (after outlier removal)
         X_mean = X_1d.mean()
         X_std = X_1d.std()
         X_plot = (X_1d - X_mean) / (n_std * X_std + 1e-8)
@@ -818,7 +868,8 @@ class CorpusVisualizer:
         # Get unique parties
         parties = metadata[party_column].unique()
         
-        # Calculate overall range for consistent axis
+        # Calculate initial range for histogram bins (will be adjusted later based on actual area plots)
+        # Use filtered data for range calculation
         max_abs_val = abs(X_plot).max()
         max_range = max_abs_val * 1.1
         x_range = [-max_range, max_range]
@@ -840,6 +891,21 @@ class CorpusVisualizer:
             if len(party_points) > 0:
                 hist, _ = np.histogram(party_points, bins=hist_bins)
                 party_hists[party] = hist
+        
+        # Track x-coordinates where area plots are actually drawn
+        area_plot_x_coords = []
+        
+        # First pass: collect all speaker counts to find maximum for proper scaling
+        max_speaker_count = 0
+        if speaker_column and speaker_column in metadata.columns:
+            for party in parties:
+                party_mask = metadata[party_column] == party
+                party_metadata = metadata[party_mask]
+                for speaker in party_metadata[speaker_column].unique():
+                    speaker_mask = (metadata[party_column] == party) & \
+                                  (metadata[speaker_column] == speaker)
+                    speaker_count = np.sum(speaker_mask)
+                    max_speaker_count = max(max_speaker_count, speaker_count)
         
         # Scale histograms so area is proportional to number of speeches
         # Since sum(hist) = count, if we scale all histograms by the same factor,
@@ -922,6 +988,9 @@ class CorpusVisualizer:
                     y_plot = []
                 
                 if len(x_plot) > 0:
+                    # Track x-coordinates for area plot range calculation
+                    area_plot_x_coords.extend(x_plot)
+                    
                     fig.add_trace(
                         go.Scatter(
                             x=x_plot,
@@ -994,12 +1063,16 @@ class CorpusVisualizer:
                     # Calculate speaker centroid
                     speaker_center = np.mean(speaker_points)
                     
-                    # Calculate speaker size with square root scaling (same as 2D)
-                    base_size = 0
-                    size_scaling = np.sqrt(speaker_count) * 4
-                    speaker_size = base_size + size_scaling
-                    max_speaker_size = 150
-                    speaker_size = min(speaker_size, max_speaker_size)
+                    # Calculate speaker size with square root scaling, normalized to max speaker count
+                    # This ensures the scale fits properly regardless of the maximum count
+                    if max_speaker_count > 0:
+                        # Normalize by max count, then apply square root scaling
+                        normalized_count = speaker_count / max_speaker_count
+                        # Use square root to prevent very large speakers from dominating
+                        size_scaling = np.sqrt(normalized_count) * 32  # Scale to max 150
+                        speaker_size = max(4, size_scaling)  # Minimum size of 8 for visibility
+                    else:
+                        speaker_size = 20  # Default size if no speakers
                     
                     # Prepare hover text
                     hover_parts = [f"<b>Party:</b> {party}"]
@@ -1028,6 +1101,16 @@ class CorpusVisualizer:
                         )
                     )
         
+        # Calculate x-axis range based on actual area plots
+        if len(area_plot_x_coords) > 0:
+            # Use the min and max of coordinates where area plots are drawn
+            area_x_min = np.min(area_plot_x_coords)
+            area_x_max = np.max(area_plot_x_coords)
+            # Add padding (5% on each side)
+            padding = (area_x_max - area_x_min) * 0.05
+            x_range = [area_x_min - padding, area_x_max + padding]
+        # If no area plots, use original range
+        
         # Update layout (matching 2D style)
         fig.update_xaxes(
             showticklabels=False,
@@ -1050,8 +1133,8 @@ class CorpusVisualizer:
         
         fig.update_layout(
             width=800,
-            height=400,
-            margin=dict(l=60, r=20, t=40, b=40),
+            height=200,
+            # margin=dict(l=60, r=20, t=40, b=40),
             font_family="Libertinus Sans",
             plot_bgcolor='white',
             title=title,
@@ -1069,7 +1152,9 @@ class CorpusVisualizer:
         if save_path:
             fig.write_html(f"{save_path}.html")
             try:
-                fig.write_image(f"{save_path}.png", scale=4, width=800, height=400)
+                # Higher resolution for better quality area plots
+                # Maintain aspect ratio: 800x200 layout -> 4800x1200 export (scale=6)
+                fig.write_image(f"{save_path}.png", scale=6, width=1600, height=400)
             except Exception as e:
                 print(f"Warning: Could not save PNG image: {e}")
         

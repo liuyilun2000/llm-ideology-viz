@@ -54,10 +54,11 @@ def cache_activations_by_id(
     activation_type: str = "mlp",
     pooling_type: str = "mean",
     device: str = "cpu",
-    batch_size: int = 100,
+    batch_size: int = 1,
     cache_dir: Optional[str] = None,
     hf_token: Optional[str] = None,
-    id_column: Optional[str] = None
+    id_column: Optional[str] = None,
+    model: Optional[HookedTransformer] = None
 ) -> None:
     """
     Cache activations for texts with per-text ID tracking.
@@ -68,15 +69,16 @@ def cache_activations_by_id(
     Args:
         df: DataFrame with texts and metadata
         text_column: Column name containing the text
-        model_name: Name of the pretrained model
+        model_name: Name of the pretrained model (used only if model is None)
         output_dir: Directory to save activations
         activation_type: Type of activation ('mlp', 'attention', 'residual', 'hidden')
         pooling_type: Pooling type ('mean', 'max', 'last')
         device: Device to run model on
-        batch_size: Number of activations per batch file
-        cache_dir: Directory to cache the model
-        hf_token: HuggingFace token
+        batch_size: Number of activations per batch file (default: 1 to minimize memory usage)
+        cache_dir: Directory to cache the model (used only if model is None)
+        hf_token: HuggingFace token (used only if model is None)
         id_column: Optional column name to use as text ID (if None, computes hash)
+        model: Optional pre-loaded HookedTransformer model to reuse (avoids double loading)
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -94,10 +96,10 @@ def cache_activations_by_id(
             'pooling_type': pooling_type
         }
     
-    # Compute text IDs for all texts
+    # Compute text IDs for all texts and identify which need processing
     text_ids = []
     texts_to_process = []
-    indices_to_process = []
+    text_ids_to_process = []  # Track text IDs for texts we need to process
     
     for idx, row in df.iterrows():
         text = row[text_column]
@@ -119,7 +121,7 @@ def cache_activations_by_id(
         # Check if already cached
         if text_id not in index['text_ids']:
             texts_to_process.append(text)
-            indices_to_process.append(idx)
+            text_ids_to_process.append(text_id)
     
     if len(texts_to_process) == 0:
         print("All texts are already cached. No extraction needed.")
@@ -127,29 +129,106 @@ def cache_activations_by_id(
     
     print(f"Found {len(texts_to_process)} new texts to process (out of {len(df)} total)")
     
-    # Load HF token if not provided
-    if hf_token is None:
-        hf_token = get_hf_token()
-    
-    # Set token as environment variable
-    original_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
-    if hf_token:
-        os.environ['HF_TOKEN'] = hf_token
-    
-    try:
-        # Load model
-        kwargs = {'trust_remote_code': True}
-        if cache_dir is not None:
-            kwargs['cache_dir'] = cache_dir
+    # Use provided model or load new one
+    model_provided = model is not None
+    if model is None:
+        # Load environment variables from .env file first
+        from utils.env_loader import load_env_to_os
+        load_env_to_os()
         
-        model = HookedTransformer.from_pretrained(model_name, **kwargs)
-    finally:
-        if original_token:
-            os.environ['HF_TOKEN'] = original_token
+        # Load HF token if not provided
+        if hf_token is None:
+            hf_token = get_hf_token()
+        
+        # Set token as environment variable (ensure it's set before model loading)
+        original_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
+        if hf_token:
+            os.environ['HF_TOKEN'] = hf_token
+            os.environ['HUGGINGFACE_TOKEN'] = hf_token  # Set both for compatibility
+        
+        try:
+            # Load model - transformer_lens reads token from HF_TOKEN environment variable
+            kwargs = {'trust_remote_code': True}
+            if cache_dir is not None:
+                kwargs['cache_dir'] = cache_dir
+            
+            # Use bfloat16 for models that are provided in bfloat16 (like Qwen3-4B)
+            # This reduces memory usage and matches how models are stored
+            if device == 'cuda' and torch.cuda.is_available():
+                # Check if CUDA supports bfloat16 (Ampere+ GPUs)
+                if torch.cuda.is_bf16_supported():
+                    kwargs['torch_dtype'] = torch.bfloat16
+                    print("Using bfloat16 precision for model loading (reduces memory usage)")
+                else:
+                    # Fallback to float16 if bfloat16 not supported
+                    kwargs['torch_dtype'] = torch.float16
+                    print("Using float16 precision for model loading (bfloat16 not supported)")
+            # For CPU, use float32 (more stable, but models are typically bfloat16)
+            
+            # Ensure token is available before loading
+            if not hf_token and not os.environ.get('HF_TOKEN') and not os.environ.get('HUGGINGFACE_TOKEN'):
+                print("Warning: No HuggingFace token found. Model loading may fail for gated models.")
+            
+            print(f"Loading model {model_name} on {device}...")
+            # Clear CUDA cache before loading to free up memory
+            if device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            model = HookedTransformer.from_pretrained(model_name, **kwargs)
+            print("Model loaded successfully")
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            raise
+        finally:
+            if original_token:
+                os.environ['HF_TOKEN'] = original_token
+                os.environ['HUGGINGFACE_TOKEN'] = original_token
+        
+        try:
+            model.eval()
+            print(f"Moving model to {device}...")
+            # Move to device with error handling
+            if device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()  # Clear cache before moving
+            model.to(device)
+            if device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.synchronize()  # Ensure move is complete
+                torch.cuda.empty_cache()
+            torch.set_grad_enabled(False)
+            print("Model setup complete")
+        except Exception as e:
+            print(f"Error setting up model: {e}")
+            if device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            raise
+    else:
+        # Model provided - verify it's on the correct device
+        # Check device by looking at model parameters
+        model_device = next(model.parameters()).device
+        target_device = torch.device(device)
+        
+        # Normalize device comparison: cuda:0 and cuda are equivalent
+        model_device_str = str(model_device)
+        target_device_str = str(target_device)
+        
+        # Check if both are CUDA devices (cuda:0, cuda:1, etc. are all valid for "cuda")
+        is_model_cuda = model_device_str.startswith('cuda')
+        is_target_cuda = target_device_str.startswith('cuda') or device == 'cuda'
+        
+        # Only move if devices don't match and it's not just a CUDA variant mismatch
+        if model_device != target_device:
+            if is_model_cuda and is_target_cuda:
+                # Both are CUDA - no need to move (cuda:0 is fine for "cuda")
+                pass
+            else:
+                # Different device types - need to move
+                print(f"Moving model from {model_device} to {target_device}...")
+                model.to(device)
     
-    model.eval()
-    model.to(device)
-    torch.set_grad_enabled(False)
+    if not model_provided:
+        print("Model loaded for activation extraction")
+    else:
+        print("Reusing provided model (avoiding double loading)")
     
     # Setup activation extraction
     activations = []
@@ -182,9 +261,8 @@ def cache_activations_by_id(
     batch_activations = []
     batch_text_ids = []
     
-    # Extract activations for new texts
-    for text, orig_idx in zip(tqdm(texts_to_process, desc="Extracting activations"), indices_to_process):
-        text_id = text_ids[orig_idx]
+    # Extract activations for new texts (text-by-text to minimize memory)
+    for text, text_id in zip(tqdm(texts_to_process, desc="Extracting activations"), text_ids_to_process):
         activations.clear()
         
         with torch.no_grad():
@@ -194,10 +272,12 @@ def cache_activations_by_id(
                 fwd_hooks=[(activation_filter, store_activation)],
             )
         
-        batch_activations.append(torch.stack(activations))
+        # Stack activations for this text and move to CPU immediately to free GPU memory
+        text_activation = torch.stack(activations).cpu()
+        batch_activations.append(text_activation)
         batch_text_ids.append(text_id)
         
-        # Save batch when full
+        # Save batch when full (more frequent saves reduce memory usage)
         if len(batch_activations) == batch_size:
             res = torch.stack(batch_activations)
             batch_file = f"{batch_idx}.pt"
@@ -211,6 +291,10 @@ def cache_activations_by_id(
             batch_idx += 1
             batch_activations = []
             batch_text_ids = []
+            
+            # Clear GPU cache periodically
+            if device == 'cuda':
+                torch.cuda.empty_cache()
     
     # Save remaining activations
     if len(batch_activations) > 0:
@@ -315,7 +399,11 @@ def load_activations_by_id(
         # Map each text_id to its activation
         for text_id in text_ids_in_batch:
             batch_pos = batch_text_ids.index(text_id)
-            activation = batch_activations[batch_pos].cpu().numpy()
+            # Convert bfloat16/float16 to float32 before numpy conversion (numpy doesn't support bfloat16)
+            activation_tensor = batch_activations[batch_pos].cpu()
+            if activation_tensor.dtype == torch.bfloat16 or activation_tensor.dtype == torch.float16:
+                activation_tensor = activation_tensor.float()  # Convert to float32
+            activation = activation_tensor.numpy()
             text_id_to_activation[text_id] = activation
     
     # Build activations array in DataFrame order
@@ -359,35 +447,81 @@ def cache_activations(
         skip_batch: Number of batches to skip (for resuming)
         hf_token: HuggingFace token. If None, tries to load from .env file or environment variable
     """
+    # Load environment variables from .env file first
+    from utils.env_loader import load_env_to_os
+    load_env_to_os()
+    
     # Load HF token if not provided
     if hf_token is None:
         hf_token = get_hf_token()
     
-    # Set token as environment variable if available (transformer_lens reads from env)
+    # Set token as environment variable (ensure it's set before model loading)
     original_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
     if hf_token:
         os.environ['HF_TOKEN'] = hf_token
+        os.environ['HUGGINGFACE_TOKEN'] = hf_token  # Set both for compatibility
     
     try:
-        # Load model
+        # Load model - transformer_lens reads token from HF_TOKEN environment variable
         kwargs = {
             'trust_remote_code': True,
         }
         if cache_dir is not None:
             kwargs['cache_dir'] = cache_dir
         
+        # Use bfloat16 for models that are provided in bfloat16 (like Qwen3-4B)
+        # This reduces memory usage and matches how models are stored
+        if device == 'cuda' and torch.cuda.is_available():
+            # Check if CUDA supports bfloat16 (Ampere+ GPUs)
+            if torch.cuda.is_bf16_supported():
+                kwargs['torch_dtype'] = torch.bfloat16
+                print("Using bfloat16 precision for model loading (reduces memory usage)")
+            else:
+                # Fallback to float16 if bfloat16 not supported
+                kwargs['torch_dtype'] = torch.float16
+                print("Using float16 precision for model loading (bfloat16 not supported)")
+        # For CPU, use float32 (more stable, but models are typically bfloat16)
+        
+        # Ensure token is available before loading
+        if not hf_token and not os.environ.get('HF_TOKEN') and not os.environ.get('HUGGINGFACE_TOKEN'):
+            print("Warning: No HuggingFace token found. Model loading may fail for gated models.")
+        
+        print(f"Loading model {model_name} on {device}...")
+        # Clear CUDA cache before loading to free up memory
+        if device == 'cuda' and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         model = HookedTransformer.from_pretrained(model_name, **kwargs)
+        print("Model loaded successfully")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
     finally:
         # Restore original token if it existed
         if original_token:
             os.environ['HF_TOKEN'] = original_token
+            os.environ['HUGGINGFACE_TOKEN'] = original_token
         elif 'HF_TOKEN' in os.environ and not hf_token:
             # Only remove if we set it and there was no original
             pass
-    model.eval()
-    model.to(device)
     
-    torch.set_grad_enabled(False)
+    try:
+        model.eval()
+        print(f"Moving model to {device}...")
+        # Move to device with error handling
+        if device == 'cuda' and torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear cache before moving
+        model.to(device)
+        if device == 'cuda' and torch.cuda.is_available():
+            torch.cuda.synchronize()  # Ensure move is complete
+            torch.cuda.empty_cache()
+        torch.set_grad_enabled(False)
+        print("Model setup complete")
+    except Exception as e:
+        print(f"Error setting up model: {e}")
+        if device == 'cuda' and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise
     
     if output_dir is None:
         output_dir = f"cache/activations/{model_name.split('/')[-1]}/{activation_type}_{pooling_type}"
@@ -543,7 +677,11 @@ def load_activations_to_dataframe(
         
         # Convert to numpy and store as list of arrays
         if isinstance(activations, torch.Tensor):
-            activations = activations.cpu().numpy()
+            # Convert bfloat16/float16 to float32 before numpy conversion (numpy doesn't support bfloat16)
+            activations_cpu = activations.cpu()
+            if activations_cpu.dtype == torch.bfloat16 or activations_cpu.dtype == torch.float16:
+                activations_cpu = activations_cpu.float()  # Convert to float32
+            activations = activations_cpu.numpy()
         
         # Check if number of activations matches DataFrame length
         if len(activations) != len(df):

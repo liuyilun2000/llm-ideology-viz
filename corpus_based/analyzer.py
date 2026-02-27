@@ -53,12 +53,14 @@ class CorpusBasedAnalyzer:
         self.device = device
         self.random_seed = random_seed
         
-        # Initialize components
+        # Initialize components (with lazy model loading)
+        # Model will only be loaded when actually needed (e.g., for extraction)
         self.extractor = ActivationExtractor(
             model_name=model_name,
             cache_dir=cache_dir,
             device=device,
-            hf_token=hf_token
+            hf_token=hf_token,
+            load_model=False  # Lazy loading - only load when needed
         )
         
         self.pooling = pooling_strategy if pooling_strategy is not None else MeanPooling()
@@ -72,6 +74,15 @@ class CorpusBasedAnalyzer:
         self.lda_models = {}
         self.projections = {}
         self.metadata = None
+    
+    def get_model(self):
+        """
+        Get the underlying model instance for reuse (e.g., in caching functions).
+        
+        Returns:
+            The HookedTransformer model instance
+        """
+        return self.extractor.get_model()
     
     def extract_and_pool(
         self,

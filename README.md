@@ -23,8 +23,8 @@ pip install transformer_lens
 ### Running Experiments
 
 ```bash
-# UK ParlaSent experiment (paper replication)
-bash scripts/run_uk_parlasent_experiment.sh
+# UK experiment (paper replication)
+bash scripts/uk_2d.sh
 
 # Or use Python script directly
 python scripts/run_corpus_based_experiment.py \
@@ -70,10 +70,8 @@ for layer_idx in [8, 16, 24]:
 
 ## Documentation
 
-- **[STATUS.md](STATUS.md)**: Current project status and completed features
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**: Code structure, design decisions, and architecture details
 - **[EXPERIMENT_SETUP.md](EXPERIMENT_SETUP.md)**: Experiment setup guide and parameter reference
-- **[CHANGELOG.md](CHANGELOG.md)**: Version history and changes
 
 ## Methodology
 

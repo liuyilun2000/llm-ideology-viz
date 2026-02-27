@@ -4,12 +4,12 @@ This directory contains shell scripts for running corpus-based framework experim
 
 ## Available Scripts
 
-### 1. `run_uk_parlasent_experiment.sh`
-Runs the UK ParlaSent experiment with LLaMA3-8B, replicating the main experiment from the paper.
+### 1. `uk_2d.sh`
+Runs the UK experiment with LLaMA3-8B, replicating the main experiment from the paper.
 
 **Usage:**
 ```bash
-./scripts/run_uk_parlasent_experiment.sh
+./scripts/uk_2d.sh
 ```
 
 **Parameters:**
@@ -19,12 +19,12 @@ Runs the UK ParlaSent experiment with LLaMA3-8B, replicating the main experiment
 - Layers: 8, 16, 24
 - Output: `output/experiments/uk_parlasent/`
 
-### 2. `run_cross_model_experiment.sh`
+### 2. `cross_model_2d.sh`
 Runs the same experiment across multiple models for cross-model comparison.
 
 **Usage:**
 ```bash
-./scripts/run_cross_model_experiment.sh
+./scripts/cross_model_2d.sh
 ```
 
 **Models tested:**
@@ -47,12 +47,12 @@ Runs experiment on German Bundestag data (requires German dataset).
 
 **Note:** This script assumes you have German Bundestag data in ParlaSent format or a compatible structure.
 
-### 4. `run_layer_analysis_experiment.sh`
+### 4. `layer_analysis_2d.sh`
 Analyzes all layers to study the evolution of ideological representations through model depth.
 
 **Usage:**
 ```bash
-./scripts/run_layer_analysis_experiment.sh
+./scripts/layer_analysis_2d.sh
 ```
 
 ## Main Script
